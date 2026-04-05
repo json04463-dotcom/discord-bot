@@ -96,14 +96,49 @@ async def 역할지급(interaction: discord.Interaction, char_name: str, server_
     if 직업역할 is None:
         직업역할 = await guild.create_role(name=class_name)
 
-    try:
-        await user.add_roles(인증역할, 서버역할, 직업역할, reason="로스트아크 인증 완료")
-    except discord.Forbidden:
-        await interaction.followup.send("❌ 역할 지급 권한이 없습니다. 봇 역할 위치를 확인해주세요.", ephemeral=True)
-        return
-    except discord.HTTPException:
-        await interaction.followup.send("❌ 역할 지급 중 오류가 발생했습니다.", ephemeral=True)
-        return
+    current_server_roles = [role for role in user.roles if role.name in servers]
+    current_class_roles = [role for role in user.roles if role.name in classes]
+
+    roles_to_remove = []
+
+    for role in current_server_roles:
+        if role.name != server_name:
+            roles_to_remove.append(role)
+
+    for role in current_class_roles:
+        if role.name != class_name:
+            roles_to_remove.append(role)
+
+    if roles_to_remove:
+        try:
+            await user.remove_roles(*roles_to_remove, reason="로스트아크 재인증 역할 정리")
+        except discord.Forbidden:
+            await interaction.followup.send("❌ 기존 역할 제거 권한이 없습니다. 봇 역할 위치를 확인해주세요.", ephemeral=True)
+            return
+        except discord.HTTPException:
+            await interaction.followup.send("❌ 기존 역할 제거 중 오류가 발생했습니다.", ephemeral=True)
+            return
+
+    roles_to_add = []
+
+    if 인증역할 not in user.roles:
+        roles_to_add.append(인증역할)
+
+    if 서버역할 not in user.roles:
+        roles_to_add.append(서버역할)
+
+    if 직업역할 not in user.roles:
+        roles_to_add.append(직업역할)
+
+    if roles_to_add:
+        try:
+            await user.add_roles(*roles_to_add, reason="로스트아크 인증 완료")
+        except discord.Forbidden:
+            await interaction.followup.send("❌ 역할 지급 권한이 없습니다. 봇 역할 위치를 확인해주세요.", ephemeral=True)
+            return
+        except discord.HTTPException:
+            await interaction.followup.send("❌ 역할 지급 중 오류가 발생했습니다.", ephemeral=True)
+            return
 
     닉네임변경실패 = False
     try:
