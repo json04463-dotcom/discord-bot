@@ -42,6 +42,14 @@ async def on_ready():
 
 
 @bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    await bot.process_commands(message)
+
+
+@bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
@@ -198,7 +206,7 @@ async def ping(ctx):
 
 
 @bot.command(name="인증")
-async def 인증(ctx):
+async def auth_command(ctx):
     await ctx.send("버튼을 눌러 인증하세요.", view=인증버튼())
 
 
