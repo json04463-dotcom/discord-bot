@@ -40,8 +40,6 @@ classes = [
 @bot.event
 async def on_ready():
     print(f"로그인됨: {bot.user}")
-
-    # 재시작 후에도 버튼 유지
     bot.add_view(인증버튼())
 
     try:
@@ -160,12 +158,10 @@ async def 역할지급(interaction: discord.Interaction, char_name: str, server_
 
     roles_to_remove = []
 
-    # 같은 서버면 유지, 다른 서버만 제거
     for role in current_server_roles:
         if role.name != server_name:
             roles_to_remove.append(role)
 
-    # 같은 직업이면 유지, 다른 직업만 제거
     for role in current_class_roles:
         if role.name != class_name:
             roles_to_remove.append(role)
