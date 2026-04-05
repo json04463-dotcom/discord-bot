@@ -2,6 +2,7 @@ import os
 import requests
 import discord
 from discord.ext import commands
+from discord import app_commands
 from datetime import datetime
 from urllib.parse import quote
 from keep_alive import keep_alive
@@ -39,7 +40,10 @@ classes = [
 @bot.event
 async def on_ready():
     print(f"로그인됨: {bot.user}")
+
+    # 재시작 후에도 버튼 유지
     bot.add_view(인증버튼())
+
     try:
         synced = await bot.tree.sync()
         print(f"슬래시 명령어 동기화 완료: {len(synced)}개")
@@ -156,10 +160,12 @@ async def 역할지급(interaction: discord.Interaction, char_name: str, server_
 
     roles_to_remove = []
 
+    # 같은 서버면 유지, 다른 서버만 제거
     for role in current_server_roles:
         if role.name != server_name:
             roles_to_remove.append(role)
 
+    # 같은 직업이면 유지, 다른 직업만 제거
     for role in current_class_roles:
         if role.name != class_name:
             roles_to_remove.append(role)
@@ -213,7 +219,7 @@ async def 역할지급(interaction: discord.Interaction, char_name: str, server_
     )
 
     if 닉네임변경실패:
-        msg += "\n⚠️ 닉네임 변경 권한이 없어서 닉네임은 바꾸지 못했습니다."
+        msg += "\n⚠️ 닉네임 변경 권한이 없어 닉네임은 바꾸지 못했습니다."
 
     await interaction.followup.send(msg, ephemeral=True)
 
@@ -221,7 +227,7 @@ async def 역할지급(interaction: discord.Interaction, char_name: str, server_
 class 캐릭터입력(discord.ui.Modal, title="캐릭터 이름 입력"):
     캐릭터명 = discord.ui.TextInput(
         label="캐릭터 이름",
-        placeholder="예: 모코콩떡",
+        placeholder="예: 나용초",
         max_length=20
     )
 
@@ -273,8 +279,15 @@ async def ping(ctx):
 
 
 @bot.command(name="인증")
+@commands.has_permissions(administrator=True)
 async def auth_command(ctx):
     await ctx.send("버튼을 눌러 자동 인증하세요.", view=인증버튼())
+
+
+@auth_command.error
+async def auth_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ 관리자만 사용할 수 있는 명령어입니다.")
 
 
 @bot.tree.command(name="핑", description="봇 응답 확인")
@@ -283,11 +296,21 @@ async def slash_ping(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="인증", description="로스트아크 자동 인증 버튼을 띄웁니다")
+@app_commands.checks.has_permissions(administrator=True)
 async def slash_auth(interaction: discord.Interaction):
     await interaction.response.send_message(
         "버튼을 눌러 자동 인증하세요.",
         view=인증버튼()
     )
+
+
+@slash_auth.error
+async def slash_auth_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message(
+            "❌ 관리자만 사용할 수 있는 명령어입니다.",
+            ephemeral=True
+        )
 
 
 keep_alive()
