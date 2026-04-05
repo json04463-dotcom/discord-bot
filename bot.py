@@ -227,7 +227,7 @@ async def 역할지급(interaction: discord.Interaction, char_name: str, server_
 class 캐릭터입력(discord.ui.Modal, title="캐릭터 이름 입력"):
     캐릭터명 = discord.ui.TextInput(
         label="캐릭터 이름",
-        placeholder="예: 나용초",
+        placeholder="예: 모코콩떡",
         max_length=20
     )
 
