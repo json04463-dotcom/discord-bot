@@ -192,9 +192,9 @@ class NameModal(discord.ui.Modal, title="캐릭터 이름 입력"):
             )
             return
 
-        await interaction.response.defer(ephemeral=True)
+await interaction.response.defer(thinking=True, ephemeral=True)
 
-        char_name, server_name, class_name = get_lostark_profile(input_name)
+char_name, server_name, class_name = get_lostark_profile(input_name)
 
         if not server_name or not class_name:
             await interaction.followup.send(
