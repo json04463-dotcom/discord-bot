@@ -55,12 +55,27 @@ API_HEADERS = {
     "authorization": f"Bearer {LOSTARK_API_KEY}",
 }
 
+SERVER_NAMES = [
+    "루페온", "아브렐슈드", "카단", "카제로스",
+    "실리안", "아만", "카마인", "니나브"
+]
+
+CLASS_NAMES = [
+    "버서커", "디스트로이어", "워로드", "홀리나이트", "슬레이어",
+    "배틀마스터", "인파이터", "기공사", "창술사", "스트라이커", "브레이커",
+    "데빌헌터", "블래스터", "호크아이", "스카우터", "건슬링어",
+    "바드", "서머너", "아르카나", "소서리스",
+    "데모닉", "블레이드", "리퍼", "소울이터",
+    "도화가", "기상술사", "환수사"
+]
+
 async def write_log(
     guild: discord.Guild,
     user: discord.Member,
     char_name: str,
     server: str,
     job: str,
+    removed_roles: list[str],
 ) -> None:
     if not LOG_CHANNEL_ID:
         return
@@ -75,10 +90,18 @@ async def write_log(
         timestamp=datetime.now(),
     )
     embed.add_field(name="유저", value=f"{user} ({user.id})", inline=False)
+    embed.add_field(name="태그", value=user.mention, inline=False)
     embed.add_field(name="캐릭터", value=char_name, inline=True)
     embed.add_field(name="서버", value=server, inline=True)
     embed.add_field(name="직업", value=job, inline=True)
     embed.add_field(name="인증방식", value="로아 API 자동 조회", inline=False)
+
+    if removed_roles:
+        embed.add_field(
+            name="재인증으로 제거된 역할",
+            value=", ".join(removed_roles),
+            inline=False,
+        )
 
     try:
         await channel.send(embed=embed)
@@ -91,7 +114,6 @@ def get_lostark_profile(character_name: str) -> tuple[str | None, str | None, st
     server_name = None
     class_name = None
 
-    # 1차: siblings 조회
     try:
         siblings_url = f"{BASE_URL}/characters/{encoded_name}/siblings"
         res = requests.get(siblings_url, headers=API_HEADERS, timeout=10)
@@ -117,7 +139,6 @@ def get_lostark_profile(character_name: str) -> tuple[str | None, str | None, st
     except Exception:
         pass
 
-    # 2차: profiles 조회로 보완
     try:
         profile_url = f"{BASE_URL}/armories/characters/{encoded_name}/profiles"
         res = requests.get(profile_url, headers=API_HEADERS, timeout=10)
@@ -163,8 +184,31 @@ async def process_auth(
     if not job_role:
         job_role = await guild.create_role(name=job)
 
+    # 재인증 시 기존 서버/직업 역할 제거
+    removed_role_names = []
+    roles_to_remove = []
+
+    for role in user.roles:
+        if role.name in SERVER_NAMES and role.name != server:
+            roles_to_remove.append(role)
+            removed_role_names.append(role.name)
+
+        if role.name in CLASS_NAMES and role.name != job:
+            roles_to_remove.append(role)
+            removed_role_names.append(role.name)
+
     try:
-        await user.add_roles(auth_role, server_role, job_role)
+        if roles_to_remove:
+            await user.remove_roles(*roles_to_remove, reason="재인증으로 서버/직업 역할 갱신")
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "❌ 기존 역할 제거 실패 (봇 권한 / 역할 위치 확인)",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        await user.add_roles(auth_role, server_role, job_role, reason="로아 자동 인증")
     except discord.Forbidden:
         await interaction.followup.send(
             "❌ 역할 지급 실패 (봇 권한 / 역할 위치 확인)",
@@ -174,18 +218,21 @@ async def process_auth(
 
     nick_ok = True
     try:
-        await user.edit(nick=char_name)
+        await user.edit(nick=char_name, reason="로아 자동 인증 닉네임 변경")
     except discord.Forbidden:
         nick_ok = False
 
-    await write_log(guild, user, char_name, server, job)
+    await write_log(guild, user, char_name, server, job, removed_role_names)
+
+    removed_text = ", ".join(removed_role_names) if removed_role_names else "없음"
 
     await interaction.followup.send(
         f"✅ 인증 완료!\n"
         f"캐릭터: {char_name}\n"
         f"서버: {server}\n"
         f"직업: {job}\n"
-        f"닉네임 변경: {'성공' if nick_ok else '실패'}",
+        f"닉네임 변경: {'성공' if nick_ok else '실패'}\n"
+        f"제거된 이전 역할: {removed_text}",
         ephemeral=True,
     )
 
