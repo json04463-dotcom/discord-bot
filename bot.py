@@ -65,6 +65,7 @@ classes = [
     "환수사",
 ]
 
+
 async def write_auth_log(
     guild: discord.Guild,
     user: discord.Member,
@@ -257,7 +258,7 @@ class CharacterNameModal(discord.ui.Modal, title="캐릭터 이름 입력"):
 
 class AuthStartView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None)
+        super().__init__(timeout=300)
 
     @discord.ui.button(label="인증하기", style=discord.ButtonStyle.green)
     async def start_auth(
