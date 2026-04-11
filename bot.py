@@ -1,13 +1,16 @@
 import os
 from datetime import datetime
+from urllib.parse import quote
 
 import discord
+import requests
 from discord.ext import commands
 from dotenv import load_dotenv
 
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
+LOSTARK_API_KEY = os.getenv("LOSTARK_API_KEY")
 LOG_CHANNEL_ID_RAW = os.getenv("LOG_CHANNEL_ID", "")
 
 if not TOKEN:
@@ -36,48 +39,34 @@ servers = [
 ]
 
 classes = [
-    "버서커",
-    "디스트로이어",
-    "워로드",
-    "홀리나이트",
-    "슬레이어",
-    "배틀마스터",
-    "인파이터",
-    "기공사",
-    "창술사",
-    "스트라이커",
-    "브레이커",
-    "데빌헌터",
-    "블래스터",
-    "호크아이",
-    "스카우터",
-    "건슬링어",
-    "바드",
-    "서머너",
-    "아르카나",
-    "소서리스",
-    "데모닉",
-    "블레이드",
-    "리퍼",
-    "소울이터",
-    "도화가",
-    "기상술사",
-    "환수사",
+    "버서커", "디스트로이어", "워로드", "홀리나이트", "슬레이어",
+    "배틀마스터", "인파이터", "기공사", "창술사", "스트라이커", "브레이커",
+    "데빌헌터", "블래스터", "호크아이", "스카우터", "건슬링어",
+    "바드", "서머너", "아르카나", "소서리스",
+    "데모닉", "블레이드", "리퍼", "소울이터",
+    "도화가", "기상술사", "환수사",
 ]
 
+BASE_URL = "https://developer-lostark.game.onstove.com"
+API_HEADERS = {
+    "accept": "application/json",
+    "authorization": f"Bearer {LOSTARK_API_KEY}" if LOSTARK_API_KEY else "",
+}
 
-async def write_auth_log(
+
+async def write_log(
     guild: discord.Guild,
     user: discord.Member,
-    character_name: str,
-    server_name: str,
-    class_name: str,
+    char_name: str,
+    server: str,
+    job: str,
+    mode: str,
 ) -> None:
     if not LOG_CHANNEL_ID:
         return
 
-    log_channel = guild.get_channel(LOG_CHANNEL_ID)
-    if log_channel is None:
+    channel = guild.get_channel(LOG_CHANNEL_ID)
+    if not channel:
         return
 
     embed = discord.Embed(
@@ -85,22 +74,79 @@ async def write_auth_log(
         color=discord.Color.green(),
         timestamp=datetime.now(),
     )
-    embed.add_field(name="유저", value=f"{user} (`{user.id}`)", inline=False)
-    embed.add_field(name="캐릭터", value=character_name, inline=True)
-    embed.add_field(name="서버", value=server_name, inline=True)
-    embed.add_field(name="직업", value=class_name, inline=True)
+    embed.add_field(name="유저", value=f"{user} ({user.id})", inline=False)
+    embed.add_field(name="캐릭터", value=char_name, inline=True)
+    embed.add_field(name="서버", value=server, inline=True)
+    embed.add_field(name="직업", value=job, inline=True)
+    embed.add_field(name="인증방식", value=mode, inline=False)
 
     try:
-        await log_channel.send(embed=embed)
+        await channel.send(embed=embed)
     except discord.Forbidden:
         pass
 
 
-async def grant_roles_and_update_nick(
+def get_lostark_profile(character_name: str) -> tuple[str | None, str | None]:
+    """
+    로아 API로 서버/직업 조회
+    성공하면 (server_name, class_name)
+    실패하면 (None, None)
+    """
+    if not LOSTARK_API_KEY:
+        return None, None
+
+    encoded_name = quote(character_name.strip())
+    server_name = None
+    class_name = None
+
+    # 1) siblings 조회
+    try:
+        siblings_url = f"{BASE_URL}/characters/{encoded_name}/siblings"
+        res = requests.get(siblings_url, headers=API_HEADERS, timeout=10)
+
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, list):
+                target = None
+
+                for c in data:
+                    api_name = str(c.get("CharacterName", "")).strip().lower()
+                    if api_name == character_name.strip().lower():
+                        target = c
+                        break
+
+                if target is None and len(data) > 0:
+                    target = data[0]
+
+                if target:
+                    server_name = target.get("ServerName")
+                    class_name = target.get("ClassName")
+    except Exception:
+        pass
+
+    # 2) profiles 조회로 직업 보완
+    if not class_name:
+        try:
+            profile_url = f"{BASE_URL}/armories/characters/{encoded_name}/profiles"
+            res = requests.get(profile_url, headers=API_HEADERS, timeout=10)
+
+            if res.status_code == 200:
+                data = res.json()
+                if isinstance(data, dict):
+                    class_name = data.get("CharacterClassName") or class_name
+                    server_name = data.get("ServerName") or server_name
+        except Exception:
+            pass
+
+    return server_name, class_name
+
+
+async def process_auth(
     interaction: discord.Interaction,
-    character_name: str,
-    server_name: str,
-    class_name: str,
+    char_name: str,
+    server: str,
+    job: str,
+    mode: str,
 ) -> None:
     guild = interaction.guild
     user = interaction.user
@@ -110,163 +156,150 @@ async def grant_roles_and_update_nick(
         return
 
     auth_role = discord.utils.get(guild.roles, name="인증됨")
-    if auth_role is None:
+    if not auth_role:
         auth_role = await guild.create_role(name="인증됨")
 
-    server_role = discord.utils.get(guild.roles, name=server_name)
-    if server_role is None:
-        server_role = await guild.create_role(name=server_name)
+    server_role = discord.utils.get(guild.roles, name=server)
+    if not server_role:
+        server_role = await guild.create_role(name=server)
 
-    class_role = discord.utils.get(guild.roles, name=class_name)
-    if class_role is None:
-        class_role = await guild.create_role(name=class_name)
+    job_role = discord.utils.get(guild.roles, name=job)
+    if not job_role:
+        job_role = await guild.create_role(name=job)
 
     try:
-        await user.add_roles(auth_role, server_role, class_role, reason="로스트아크 수동 인증")
+        await user.add_roles(auth_role, server_role, job_role)
     except discord.Forbidden:
-        await interaction.followup.send(
-            "❌ 역할 지급 실패: 봇 권한 또는 역할 위치를 확인해주세요.",
-            ephemeral=True,
-        )
+        await interaction.followup.send("❌ 역할 지급 실패 (봇 권한 / 역할 위치 확인)", ephemeral=True)
         return
 
-    nick_changed = True
+    nick_ok = True
     try:
-        await user.edit(nick=character_name, reason="로스트아크 수동 인증 닉네임 변경")
+        await user.edit(nick=char_name)
     except discord.Forbidden:
-        nick_changed = False
+        nick_ok = False
 
-    await write_auth_log(guild, user, character_name, server_name, class_name)
+    await write_log(guild, user, char_name, server, job, mode)
 
-    message = (
+    await interaction.followup.send(
         f"✅ 인증 완료!\n"
-        f"캐릭터: {character_name}\n"
-        f"서버: {server_name}\n"
-        f"직업: {class_name}\n"
-        f"닉네임 변경: {'성공' if nick_changed else '실패'}"
+        f"캐릭터: {char_name}\n"
+        f"서버: {server}\n"
+        f"직업: {job}\n"
+        f"닉네임 변경: {'성공' if nick_ok else '실패'}\n"
+        f"인증방식: {mode}",
+        ephemeral=True,
     )
-    await interaction.followup.send(message, ephemeral=True)
 
 
-class ClassSelect(discord.ui.Select):
-    def __init__(self, character_name: str, server_name: str):
-        self.character_name = character_name
-        self.server_name = server_name
+class JobSelect(discord.ui.Select):
+    def __init__(self, char_name: str, server: str):
+        self.char_name = char_name
+        self.server = server
 
-        options = [discord.SelectOption(label=name) for name in classes[:25]]
-        super().__init__(
-            placeholder="직업을 선택해주세요",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
+        options = [discord.SelectOption(label=c) for c in classes[:25]]
+        super().__init__(placeholder="직업 선택", options=options)
 
-    async def callback(self, interaction: discord.Interaction) -> None:
-        selected_class = self.values[0]
+    async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        await grant_roles_and_update_nick(
+        await process_auth(
             interaction,
-            self.character_name,
-            self.server_name,
-            selected_class,
+            self.char_name,
+            self.server,
+            self.values[0],
+            mode="수동 선택",
         )
 
 
-class ExtraClassSelect(discord.ui.Select):
-    def __init__(self, character_name: str, server_name: str):
-        self.character_name = character_name
-        self.server_name = server_name
+class ExtraJobSelect(discord.ui.Select):
+    def __init__(self, char_name: str, server: str):
+        self.char_name = char_name
+        self.server = server
 
-        extra_classes = classes[25:]
-        options = [discord.SelectOption(label=name) for name in extra_classes]
-        super().__init__(
-            placeholder="나머지 직업 선택",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
+        extra = classes[25:]
+        options = [discord.SelectOption(label=c) for c in extra]
+        super().__init__(placeholder="나머지 직업 선택", options=options)
 
-    async def callback(self, interaction: discord.Interaction) -> None:
-        selected_class = self.values[0]
+    async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        await grant_roles_and_update_nick(
+        await process_auth(
             interaction,
-            self.character_name,
-            self.server_name,
-            selected_class,
+            self.char_name,
+            self.server,
+            self.values[0],
+            mode="수동 선택",
         )
 
 
-class ClassSelectView(discord.ui.View):
-    def __init__(self, character_name: str, server_name: str):
+class JobView(discord.ui.View):
+    def __init__(self, char_name: str, server: str):
         super().__init__(timeout=300)
-        self.add_item(ClassSelect(character_name, server_name))
+        self.add_item(JobSelect(char_name, server))
         if len(classes) > 25:
-            self.add_item(ExtraClassSelect(character_name, server_name))
+            self.add_item(ExtraJobSelect(char_name, server))
 
 
 class ServerSelect(discord.ui.Select):
-    def __init__(self, character_name: str):
-        self.character_name = character_name
+    def __init__(self, char_name: str):
+        self.char_name = char_name
 
-        options = [discord.SelectOption(label=name) for name in servers]
-        super().__init__(
-            placeholder="서버를 선택해주세요",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
+        options = [discord.SelectOption(label=s) for s in servers]
+        super().__init__(placeholder="서버 선택", options=options)
 
-    async def callback(self, interaction: discord.Interaction) -> None:
-        selected_server = self.values[0]
+    async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_message(
-            "직업을 선택해주세요.",
-            view=ClassSelectView(self.character_name, selected_server),
+            "직업을 선택해주세요",
+            view=JobView(self.char_name, self.values[0]),
             ephemeral=True,
         )
 
 
-class ServerSelectView(discord.ui.View):
-    def __init__(self, character_name: str):
+class ServerView(discord.ui.View):
+    def __init__(self, char_name: str):
         super().__init__(timeout=300)
-        self.add_item(ServerSelect(character_name))
+        self.add_item(ServerSelect(char_name))
 
 
-class CharacterNameModal(discord.ui.Modal, title="캐릭터 이름 입력"):
-    character_name = discord.ui.TextInput(
-        label="캐릭터 이름",
-        placeholder="예: 만개초",
-        min_length=1,
-        max_length=20,
-    )
+class NameModal(discord.ui.Modal, title="캐릭터 이름 입력"):
+    name = discord.ui.TextInput(label="캐릭터 이름", placeholder="예: 만개초")
 
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        name = str(self.character_name.value).strip()
-        if not name:
-            await interaction.response.send_message(
-                "❌ 캐릭터 이름을 입력해주세요.",
-                ephemeral=True,
+    async def on_submit(self, interaction: discord.Interaction):
+        char_name = str(self.name.value).strip()
+
+        if not char_name:
+            await interaction.response.send_message("❌ 캐릭터 이름을 입력해주세요.", ephemeral=True)
+            return
+
+        # 로아 API 자동 조회
+        server_name, class_name = get_lostark_profile(char_name)
+
+        # 자동 인증 성공
+        if server_name and class_name:
+            await interaction.response.defer(ephemeral=True)
+            await process_auth(
+                interaction,
+                char_name,
+                server_name,
+                class_name,
+                mode="로아 API 자동 조회",
             )
             return
 
+        # 자동 실패 → 수동 선택
         await interaction.response.send_message(
-            "서버를 선택해주세요.",
-            view=ServerSelectView(name),
+            "⚠️ 로아 API 자동 조회에 실패했습니다.\n서버를 직접 선택해주세요.",
+            view=ServerView(char_name),
             ephemeral=True,
         )
 
 
-class AuthStartView(discord.ui.View):
+class AuthView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=300)
 
     @discord.ui.button(label="인증하기", style=discord.ButtonStyle.green)
-    async def start_auth(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await interaction.response.send_modal(CharacterNameModal())
+    async def button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(NameModal())
 
 
 @bot.event
@@ -275,8 +308,8 @@ async def on_ready():
 
 
 @bot.command()
-async def 인증(ctx: commands.Context):
-    await ctx.send("아래 버튼을 눌러 인증을 진행하세요.", view=AuthStartView())
+async def 인증(ctx):
+    await ctx.send("버튼을 눌러 인증하세요", view=AuthView())
 
 
 bot.run(TOKEN)
