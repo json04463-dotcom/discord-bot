@@ -1,9 +1,11 @@
 import os
+import threading
 from datetime import datetime
 from urllib.parse import quote
 
 import discord
 import requests
+from flask import Flask
 from discord.ext import commands
 from dotenv import load_dotenv
 
@@ -12,6 +14,7 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 LOSTARK_API_KEY = os.getenv("LOSTARK_API_KEY")
 LOG_CHANNEL_ID_RAW = os.getenv("LOG_CHANNEL_ID", "")
+PORT = int(os.getenv("PORT", "10000"))
 
 if not TOKEN:
     raise ValueError("TOKEN 환경변수가 설정되지 않았습니다.")
@@ -24,6 +27,22 @@ try:
 except ValueError:
     LOG_CHANNEL_ID = None
 
+# Flask 서버
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is running", 200
+
+def run_web():
+    app.run(host="0.0.0.0", port=PORT)
+
+def keep_alive():
+    thread = threading.Thread(target=run_web)
+    thread.daemon = True
+    thread.start()
+
+# Discord 설정
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -35,7 +54,6 @@ API_HEADERS = {
     "accept": "application/json",
     "authorization": f"Bearer {LOSTARK_API_KEY}",
 }
-
 
 async def write_log(
     guild: discord.Guild,
@@ -67,12 +85,7 @@ async def write_log(
     except discord.Forbidden:
         pass
 
-
 def get_lostark_profile(character_name: str) -> tuple[str | None, str | None, str | None]:
-    """
-    성공하면 (실제캐릭터명, 서버명, 직업명)
-    실패하면 (None, None, None)
-    """
     encoded_name = quote(character_name.strip())
     found_char_name = None
     server_name = None
@@ -112,7 +125,6 @@ def get_lostark_profile(character_name: str) -> tuple[str | None, str | None, st
         if res.status_code == 200:
             data = res.json()
             if isinstance(data, dict):
-                found_char_name = data.get("CharacterImage") and found_char_name or found_char_name
                 server_name = data.get("ServerName") or server_name
                 class_name = data.get("CharacterClassName") or class_name
     except Exception:
@@ -125,7 +137,6 @@ def get_lostark_profile(character_name: str) -> tuple[str | None, str | None, st
         return None, None, None
 
     return found_char_name, server_name, class_name
-
 
 async def process_auth(
     interaction: discord.Interaction,
@@ -178,7 +189,6 @@ async def process_auth(
         ephemeral=True,
     )
 
-
 class NameModal(discord.ui.Modal, title="캐릭터 이름 입력"):
     name = discord.ui.TextInput(label="캐릭터 이름", placeholder="예: 만개초")
 
@@ -192,9 +202,9 @@ class NameModal(discord.ui.Modal, title="캐릭터 이름 입력"):
             )
             return
 
-await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer(thinking=True, ephemeral=True)
 
-char_name, server_name, class_name = get_lostark_profile(input_name)
+        char_name, server_name, class_name = get_lostark_profile(input_name)
 
         if not server_name or not class_name:
             await interaction.followup.send(
@@ -205,7 +215,6 @@ char_name, server_name, class_name = get_lostark_profile(input_name)
 
         await process_auth(interaction, char_name, server_name, class_name)
 
-
 class AuthView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=300)
@@ -214,15 +223,13 @@ class AuthView(discord.ui.View):
     async def button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(NameModal())
 
-
 @bot.event
 async def on_ready():
     print(f"로그인됨: {bot.user}")
-
 
 @bot.command()
 async def 인증(ctx):
     await ctx.send("버튼을 눌러 인증하세요", view=AuthView())
 
-
+keep_alive()
 bot.run(TOKEN)
