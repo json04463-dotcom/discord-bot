@@ -270,7 +270,6 @@ class AuthStartView(discord.ui.View):
 
 @bot.event
 async def on_ready():
-    bot.add_view(AuthStartView())
     print(f"로그인됨: {bot.user}")
 
 
