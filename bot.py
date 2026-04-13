@@ -27,6 +27,9 @@ try:
 except ValueError:
     LOG_CHANNEL_ID = None
 
+UNVERIFIED_ROLE_NAME = "미인증"
+VERIFIED_ROLE_NAME = "인증됨"
+
 # ---------------------------
 # Render Web Service용 Flask
 # ---------------------------
@@ -150,7 +153,6 @@ def get_lostark_profile(character_name: str) -> tuple[str | None, str | None, st
     server_name = None
     class_name = None
 
-    # 1차: siblings 조회
     try:
         res = requests.get(
             f"{BASE_URL}/characters/{encoded_name}/siblings",
@@ -178,7 +180,6 @@ def get_lostark_profile(character_name: str) -> tuple[str | None, str | None, st
     except Exception:
         pass
 
-    # 2차: profiles 조회로 보완
     try:
         res = requests.get(
             f"{BASE_URL}/armories/characters/{encoded_name}/profiles",
@@ -218,9 +219,13 @@ async def process_auth(
         await interaction.followup.send("❌ 서버 안에서만 사용할 수 있습니다.", ephemeral=True)
         return
 
-    auth_role = discord.utils.get(guild.roles, name="인증됨")
+    auth_role = discord.utils.get(guild.roles, name=VERIFIED_ROLE_NAME)
     if auth_role is None:
-        auth_role = await guild.create_role(name="인증됨")
+        auth_role = await guild.create_role(name=VERIFIED_ROLE_NAME)
+
+    unverified_role = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE_NAME)
+    if unverified_role is None:
+        unverified_role = await guild.create_role(name=UNVERIFIED_ROLE_NAME)
 
     server_role = discord.utils.get(guild.roles, name=server)
     if server_role is None:
@@ -230,10 +235,10 @@ async def process_auth(
     if job_role is None:
         job_role = await guild.create_role(name=job)
 
-    # 재인증 시 기존 서버/직업 역할 제거
     removed_role_names: list[str] = []
     roles_to_remove: list[discord.Role] = []
 
+    # 재인증 시 기존 서버/직업 역할 제거
     for role in user.roles:
         if role.name in SERVER_NAMES and role.name != server:
             roles_to_remove.append(role)
@@ -243,9 +248,14 @@ async def process_auth(
             roles_to_remove.append(role)
             removed_role_names.append(role.name)
 
+    # 인증 완료 시 미인증 제거
+    if unverified_role in user.roles:
+        roles_to_remove.append(unverified_role)
+        removed_role_names.append(unverified_role.name)
+
     try:
         if roles_to_remove:
-            await user.remove_roles(*roles_to_remove, reason="재인증으로 서버/직업 역할 갱신")
+            await user.remove_roles(*roles_to_remove, reason="인증/재인증으로 역할 갱신")
     except discord.Forbidden:
         await interaction.followup.send(
             "❌ 기존 역할 제거 실패 (봇 권한 / 역할 위치 확인)",
@@ -281,6 +291,25 @@ async def process_auth(
         f"제거된 이전 역할: {removed_text}",
         ephemeral=True,
     )
+
+# ---------------------------
+# 신규 입장 시 미인증 역할 부여
+# ---------------------------
+@bot.event
+async def on_member_join(member: discord.Member):
+    guild = member.guild
+
+    unverified_role = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE_NAME)
+    if unverified_role is None:
+        try:
+            unverified_role = await guild.create_role(name=UNVERIFIED_ROLE_NAME)
+        except discord.Forbidden:
+            return
+
+    try:
+        await member.add_roles(unverified_role, reason="신규 입장자 미인증 역할 부여")
+    except discord.Forbidden:
+        pass
 
 # ---------------------------
 # 모달
@@ -331,7 +360,7 @@ class AuthView(discord.ui.View):
 # ---------------------------
 @bot.command()
 async def 인증(ctx: commands.Context):
-    await ctx.send("버튼을 눌러 인증하세요", view=AuthView())
+    await ctx.send("버튼을 눌러 인증하세요.", view=AuthView())
 
 @bot.event
 async def on_ready():
