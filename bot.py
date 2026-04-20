@@ -1,5 +1,6 @@
 import os
 import threading
+import time
 from datetime import datetime
 from urllib.parse import quote
 
@@ -103,6 +104,9 @@ CLASS_NAMES = [
     "환수사",
 ]
 
+# 같은 유저 연속 클릭 방지
+active_auth_users: set[int] = set()
+
 # ---------------------------
 # 로그 함수
 # ---------------------------
@@ -143,6 +147,19 @@ async def write_log(
         await channel.send(embed=embed)
     except discord.Forbidden:
         pass
+
+# ---------------------------
+# 역할 찾기/생성
+# ---------------------------
+async def get_or_create_role(guild: discord.Guild, role_name: str) -> discord.Role | None:
+    role = discord.utils.get(guild.roles, name=role_name)
+    if role:
+        return role
+
+    try:
+        return await guild.create_role(name=role_name)
+    except discord.Forbidden:
+        return None
 
 # ---------------------------
 # 로아 API 조회
@@ -219,26 +236,22 @@ async def process_auth(
         await interaction.followup.send("❌ 서버 안에서만 사용할 수 있습니다.", ephemeral=True)
         return
 
-    auth_role = discord.utils.get(guild.roles, name=VERIFIED_ROLE_NAME)
-    if auth_role is None:
-        auth_role = await guild.create_role(name=VERIFIED_ROLE_NAME)
+    auth_role = await get_or_create_role(guild, VERIFIED_ROLE_NAME)
+    unverified_role = await get_or_create_role(guild, UNVERIFIED_ROLE_NAME)
+    server_role = await get_or_create_role(guild, server)
+    job_role = await get_or_create_role(guild, job)
 
-    unverified_role = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE_NAME)
-    if unverified_role is None:
-        unverified_role = await guild.create_role(name=UNVERIFIED_ROLE_NAME)
-
-    server_role = discord.utils.get(guild.roles, name=server)
-    if server_role is None:
-        server_role = await guild.create_role(name=server)
-
-    job_role = discord.utils.get(guild.roles, name=job)
-    if job_role is None:
-        job_role = await guild.create_role(name=job)
+    if not auth_role or not unverified_role or not server_role or not job_role:
+        await interaction.followup.send(
+            "❌ 역할 생성 또는 조회에 실패했습니다. 봇 권한을 확인해주세요.",
+            ephemeral=True,
+        )
+        return
 
     removed_role_names: list[str] = []
     roles_to_remove: list[discord.Role] = []
 
-    # 재인증 시 기존 서버/직업 역할 제거
+    # 기존 서버/직업 역할 중 다른 것만 제거
     for role in user.roles:
         if role.name in SERVER_NAMES and role.name != server:
             roles_to_remove.append(role)
@@ -248,14 +261,22 @@ async def process_auth(
             roles_to_remove.append(role)
             removed_role_names.append(role.name)
 
-    # 인증 완료 시 미인증 제거
+    # 인증되면 미인증 제거
     if unverified_role in user.roles:
         roles_to_remove.append(unverified_role)
         removed_role_names.append(unverified_role.name)
 
+    # 중복 제거
+    unique_remove_roles = []
+    seen_remove_ids = set()
+    for role in roles_to_remove:
+        if role.id not in seen_remove_ids:
+            unique_remove_roles.append(role)
+            seen_remove_ids.add(role.id)
+
     try:
-        if roles_to_remove:
-            await user.remove_roles(*roles_to_remove, reason="인증/재인증으로 역할 갱신")
+        if unique_remove_roles:
+            await user.remove_roles(*unique_remove_roles, reason="인증/재인증으로 역할 갱신")
     except discord.Forbidden:
         await interaction.followup.send(
             "❌ 기존 역할 제거 실패 (봇 권한 / 역할 위치 확인)",
@@ -263,8 +284,17 @@ async def process_auth(
         )
         return
 
+    # 이미 가진 역할은 다시 추가하지 않음
+    roles_to_add = []
+    current_role_ids = {role.id for role in user.roles}
+
+    for role in (auth_role, server_role, job_role):
+        if role.id not in current_role_ids:
+            roles_to_add.append(role)
+
     try:
-        await user.add_roles(auth_role, server_role, job_role, reason="로아 자동 인증")
+        if roles_to_add:
+            await user.add_roles(*roles_to_add, reason="로아 자동 인증")
     except discord.Forbidden:
         await interaction.followup.send(
             "❌ 역할 지급 실패 (봇 권한 / 역할 위치 확인)",
@@ -272,9 +302,11 @@ async def process_auth(
         )
         return
 
+    # 닉네임이 다를 때만 변경
     nick_ok = True
     try:
-        await user.edit(nick=char_name, reason="로아 자동 인증 닉네임 변경")
+        if user.nick != char_name:
+            await user.edit(nick=char_name, reason="로아 자동 인증 닉네임 변경")
     except discord.Forbidden:
         nick_ok = False
 
@@ -298,13 +330,13 @@ async def process_auth(
 @bot.event
 async def on_member_join(member: discord.Member):
     guild = member.guild
+    unverified_role = await get_or_create_role(guild, UNVERIFIED_ROLE_NAME)
 
-    unverified_role = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE_NAME)
-    if unverified_role is None:
-        try:
-            unverified_role = await guild.create_role(name=UNVERIFIED_ROLE_NAME)
-        except discord.Forbidden:
-            return
+    if not unverified_role:
+        return
+
+    if unverified_role in member.roles:
+        return
 
     try:
         await member.add_roles(unverified_role, reason="신규 입장자 미인증 역할 부여")
@@ -318,6 +350,15 @@ class NameModal(discord.ui.Modal, title="캐릭터 이름 입력"):
     name = discord.ui.TextInput(label="캐릭터 이름", placeholder="예: 만개초")
 
     async def on_submit(self, interaction: discord.Interaction):
+        user_id = interaction.user.id
+
+        if user_id in active_auth_users:
+            await interaction.response.send_message(
+                "⚠️ 이미 인증 처리 중입니다. 잠시 후 다시 시도해주세요.",
+                ephemeral=True,
+            )
+            return
+
         input_name = str(self.name.value).strip()
 
         if not input_name:
@@ -327,18 +368,24 @@ class NameModal(discord.ui.Modal, title="캐릭터 이름 입력"):
             )
             return
 
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        active_auth_users.add(user_id)
 
-        char_name, server_name, class_name = get_lostark_profile(input_name)
+        try:
+            await interaction.response.defer(thinking=True, ephemeral=True)
 
-        if not server_name or not class_name:
-            await interaction.followup.send(
-                "❌ 서버 또는 직업 정보를 가져올 수 없어 인증에 실패했습니다.",
-                ephemeral=True,
-            )
-            return
+            char_name, server_name, class_name = get_lostark_profile(input_name)
 
-        await process_auth(interaction, char_name, server_name, class_name)
+            if not server_name or not class_name:
+                await interaction.followup.send(
+                    "❌ 서버 또는 직업 정보를 가져올 수 없어 인증에 실패했습니다.",
+                    ephemeral=True,
+                )
+                return
+
+            await process_auth(interaction, char_name, server_name, class_name)
+
+        finally:
+            active_auth_users.discard(user_id)
 
 # ---------------------------
 # Persistent View
@@ -353,14 +400,35 @@ class AuthView(discord.ui.View):
         custom_id="auth_button"
     )
     async def button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id in active_auth_users:
+            await interaction.response.send_message(
+                "⚠️ 이미 인증 처리 중입니다. 잠시 후 다시 시도해주세요.",
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.send_modal(NameModal())
 
 # ---------------------------
 # 명령어 / 이벤트
 # ---------------------------
 @bot.command()
+@commands.cooldown(1, 15, commands.BucketType.user)
 async def 인증(ctx: commands.Context):
     await ctx.send("버튼을 눌러 인증하세요.", view=AuthView())
+
+@bot.command()
+@commands.cooldown(1, 10, commands.BucketType.user)
+async def 테스트(ctx: commands.Context):
+    await ctx.send("✅ 테스트 성공 (명령어 작동 중)")
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error):
+    if isinstance(error, commands.CommandOnCooldown):
+        await ctx.send(f"⏳ 잠시 후 다시 시도해주세요. ({error.retry_after:.1f}초)")
+        return
+
+    print(f"명령어 오류: {error}")
 
 @bot.event
 async def on_ready():
