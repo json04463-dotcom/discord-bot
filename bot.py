@@ -31,6 +31,8 @@ except ValueError:
 UNVERIFIED_ROLE_NAME = "미인증"
 VERIFIED_ROLE_NAME = "인증됨"
 
+MIN_ITEM_LEVEL = 1740
+
 # ---------------------------
 # Render Web Service용 Flask
 # ---------------------------
@@ -116,6 +118,7 @@ async def write_log(
     char_name: str,
     server: str,
     job: str,
+    item_level: float,
     removed_roles: list[str],
 ) -> None:
     if not LOG_CHANNEL_ID:
@@ -135,7 +138,12 @@ async def write_log(
     embed.add_field(name="캐릭터", value=char_name, inline=True)
     embed.add_field(name="서버", value=server, inline=True)
     embed.add_field(name="직업", value=job, inline=True)
-
+    embed.add_field(
+        name="아이템레벨",
+        value=f"{item_level:.2f}",
+        inline=True,
+    )
+    
     if removed_roles:
         embed.add_field(
             name="재인증으로 제거된 역할",
@@ -164,12 +172,20 @@ async def get_or_create_role(guild: discord.Guild, role_name: str) -> discord.Ro
 # ---------------------------
 # 로아 API 조회
 # ---------------------------
-def get_lostark_profile(character_name: str) -> tuple[str | None, str | None, str | None]:
+def get_lostark_profile(
+    character_name: str,
+) -> tuple[str | None, str |None, str | None, float | None]:
+
     encoded_name = quote(character_name.strip())
+
     found_char_name = None
     server_name = None
     class_name = None
+    item_level = None
 
+    # ---------------------------
+    # 형제 캐릭터 조회
+    # ---------------------------
     try:
         res = requests.get(
             f"{BASE_URL}/characters/{encoded_name}/siblings",
@@ -179,11 +195,16 @@ def get_lostark_profile(character_name: str) -> tuple[str | None, str | None, st
 
         if res.status_code == 200:
             data = res.json()
+
             if isinstance(data, list) and data:
+
                 target = None
 
                 for c in data:
-                    api_name = str(c.get("CharacterName", "")).strip().lower()
+                    api_name = str(
+                        c.get("CharacterName", "")
+                    ).strip().lower()
+
                     if api_name == character_name.strip().lower():
                         target = c
                         break
@@ -194,9 +215,13 @@ def get_lostark_profile(character_name: str) -> tuple[str | None, str | None, st
                 found_char_name = target.get("CharacterName")
                 server_name = target.get("ServerName")
                 class_name = target.get("ClassName")
+
     except Exception:
         pass
 
+    # ---------------------------
+    # 프로필 조회
+    # ---------------------------
     try:
         res = requests.get(
             f"{BASE_URL}/armories/characters/{encoded_name}/profiles",
@@ -206,20 +231,47 @@ def get_lostark_profile(character_name: str) -> tuple[str | None, str | None, st
 
         if res.status_code == 200:
             data = res.json()
+
             if isinstance(data, dict):
-                server_name = data.get("ServerName") or server_name
-                class_name = data.get("CharacterClassName") or class_name
+
+                server_name = (
+                    data.get("ServerName")
+                    or server_name
+                )
+
+                class_name = (
+                    data.get("CharacterClassName")
+                    or class_name
+                )
+
+                level = data.get("ItemMaxLevel")
+
+                if level:
+                    try:
+                        item_level = float(
+                            level.replace(",", "")
+                        )
+                    except ValueError:
+                        item_level = None
+
     except Exception:
         pass
 
+    # ---------------------------
+    # 기본값 처리
+    # ---------------------------
     if not found_char_name:
         found_char_name = character_name
 
     if not server_name or not class_name:
-        return None, None, None
+        return None, None, None, None
 
-    return found_char_name, server_name, class_name
-
+    return (
+        found_char_name,
+        server_name,
+        class_name,
+        item_level,
+    )
 # ---------------------------
 # 인증 처리
 # ---------------------------
@@ -228,12 +280,17 @@ async def process_auth(
     char_name: str,
     server: str,
     job: str,
+    item_level: float,
 ) -> None:
+
     guild = interaction.guild
     user = interaction.user
 
     if guild is None or not isinstance(user, discord.Member):
-        await interaction.followup.send("❌ 서버 안에서만 사용할 수 있습니다.", ephemeral=True)
+        await interaction.followup.send(
+            "❌ 서버 안에서만 사용할 수 있습니다.",
+            ephemeral=True,
+        )
         return
 
     auth_role = await get_or_create_role(guild, VERIFIED_ROLE_NAME)
@@ -241,89 +298,116 @@ async def process_auth(
     server_role = await get_or_create_role(guild, server)
     job_role = await get_or_create_role(guild, job)
 
-    if not auth_role or not unverified_role or not server_role or not job_role:
+    if not all([auth_role, unverified_role, server_role, job_role]):
         await interaction.followup.send(
-            "❌ 역할 생성 또는 조회에 실패했습니다. 봇 권한을 확인해주세요.",
+            "❌ 역할을 생성하거나 불러오지 못했습니다.\n봇 권한을 확인해주세요.",
             ephemeral=True,
         )
         return
 
-    removed_role_names: list[str] = []
-    roles_to_remove: list[discord.Role] = []
+    removed_role_names = []
+    remove_roles = []
 
-    # 기존 서버/직업 역할 중 다른 것만 제거
+    # 기존 서버/직업 역할 제거
     for role in user.roles:
+
         if role.name in SERVER_NAMES and role.name != server:
-            roles_to_remove.append(role)
+            remove_roles.append(role)
             removed_role_names.append(role.name)
 
-        if role.name in CLASS_NAMES and role.name != job:
-            roles_to_remove.append(role)
+        elif role.name in CLASS_NAMES and role.name != job:
+            remove_roles.append(role)
             removed_role_names.append(role.name)
 
-    # 인증되면 미인증 제거
+    # 미인증 역할 제거
     if unverified_role in user.roles:
-        roles_to_remove.append(unverified_role)
+        remove_roles.append(unverified_role)
         removed_role_names.append(unverified_role.name)
 
     # 중복 제거
-    unique_remove_roles = []
-    seen_remove_ids = set()
-    for role in roles_to_remove:
-        if role.id not in seen_remove_ids:
-            unique_remove_roles.append(role)
-            seen_remove_ids.add(role.id)
+    unique_remove = []
+
+    for role in remove_roles:
+        if role not in unique_remove:
+            unique_remove.append(role)
 
     try:
-        if unique_remove_roles:
-            await user.remove_roles(*unique_remove_roles, reason="인증/재인증으로 역할 갱신")
+        if unique_remove:
+            await user.remove_roles(
+                *unique_remove,
+                reason="재인증 역할 갱신",
+            )
+
     except discord.Forbidden:
         await interaction.followup.send(
-            "❌ 기존 역할 제거 실패 (봇 권한 / 역할 위치 확인)",
+            "❌ 기존 역할 제거에 실패했습니다.\n봇 역할을 위로 올려주세요.",
             ephemeral=True,
         )
         return
 
-    # 이미 가진 역할은 다시 추가하지 않음
-    roles_to_add = []
-    current_role_ids = {role.id for role in user.roles}
+    # 필요한 역할만 추가
+    current_roles = set(user.roles)
+
+    add_roles = []
 
     for role in (auth_role, server_role, job_role):
-        if role.id not in current_role_ids:
-            roles_to_add.append(role)
+        if role not in current_roles:
+            add_roles.append(role)
 
     try:
-        if roles_to_add:
-            await user.add_roles(*roles_to_add, reason="로아 자동 인증")
+        if add_roles:
+            await user.add_roles(
+                *add_roles,
+                reason="로스트아크 인증",
+            )
+
     except discord.Forbidden:
         await interaction.followup.send(
-            "❌ 역할 지급 실패 (봇 권한 / 역할 위치 확인)",
+            "❌ 역할 지급에 실패했습니다.\n봇 권한을 확인해주세요.",
             ephemeral=True,
         )
         return
 
-    # 닉네임이 다를 때만 변경
-    nick_ok = True
+    # 닉네임 변경
+    nickname_success = True
+
     try:
         if user.nick != char_name:
-            await user.edit(nick=char_name, reason="로아 자동 인증 닉네임 변경")
+            await user.edit(
+                nick=char_name,
+                reason="로아 자동 인증",
+            )
+
     except discord.Forbidden:
-        nick_ok = False
+        nickname_success = False
 
-    await write_log(guild, user, char_name, server, job, removed_role_names)
-
-    removed_text = ", ".join(removed_role_names) if removed_role_names else "없음"
-
-    await interaction.followup.send(
-        f"✅ 인증 완료!\n"
-        f"캐릭터: {char_name}\n"
-        f"서버: {server}\n"
-        f"직업: {job}\n"
-        f"닉네임 변경: {'성공' if nick_ok else '실패'}\n"
-        f"제거된 이전 역할: {removed_text}",
-        ephemeral=True,
+    # 로그
+    await write_log(
+        guild,
+        user,
+        char_name,
+        server,
+        job,
+        item_level,
+        removed_role_names,
     )
 
+    removed_text = (
+        ", ".join(removed_role_names)
+        if removed_role_names
+        else "없음"
+    )
+
+    await interaction.followup.send(
+        f"✅ 인증 완료!\n\n"
+        f"캐릭터 : {char_name}\n"
+        f"서버 : {server}\n"
+        f"직업 : {job}\n"
+        f"아이템레벨 : {item_level:.2f}\n\n"
+        f"닉네임 변경 : {'성공' if nickname_success else '실패'}\n"
+        f"제거된 역할 : {removed_text}",
+        ephemeral=True,
+    )
 # ---------------------------
 # 신규 입장 시 미인증 역할 부여
 # ---------------------------
@@ -347,9 +431,13 @@ async def on_member_join(member: discord.Member):
 # 모달
 # ---------------------------
 class NameModal(discord.ui.Modal, title="캐릭터 이름 입력"):
-    name = discord.ui.TextInput(label="캐릭터 이름", placeholder="예: 만개초")
+    name = discord.ui.TextInput(
+        label="캐릭터 이름",
+        placeholder="예: 만개초"
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
+
         user_id = interaction.user.id
 
         if user_id in active_auth_users:
@@ -371,18 +459,57 @@ class NameModal(discord.ui.Modal, title="캐릭터 이름 입력"):
         active_auth_users.add(user_id)
 
         try:
-            await interaction.response.defer(thinking=True, ephemeral=True)
+            await interaction.response.defer(
+                thinking=True,
+                ephemeral=True,
+            )
 
-            char_name, server_name, class_name = get_lostark_profile(input_name)
+            # -------------------------
+            # 로스트아크 API 조회
+            # -------------------------
+            (
+                char_name,
+                server_name,
+                class_name,
+                item_level,
+            ) = get_lostark_profile(input_name)
 
             if not server_name or not class_name:
                 await interaction.followup.send(
-                    "❌ 서버 또는 직업 정보를 가져올 수 없어 인증에 실패했습니다.",
+                    "❌ 서버 또는 직업 정보를 가져올 수 없습니다.",
                     ephemeral=True,
                 )
                 return
 
-            await process_auth(interaction, char_name, server_name, class_name)
+            if item_level is None:
+                await interaction.followup.send(
+                    "❌ 아이템레벨을 확인할 수 없습니다.",
+                    ephemeral=True,
+                )
+                return
+
+            # -------------------------
+            # 최소 레벨 검사
+            # -------------------------
+            if item_level < MIN_ITEM_LEVEL:
+                await interaction.followup.send(
+                    f"❌ 인증 실패\n\n"
+                    f"현재 아이템레벨 : {item_level:.2f}\n"
+                    f"인증 가능 레벨 : {MIN_ITEM_LEVEL} 이상",
+                    ephemeral=True,
+                )
+                return
+
+            # -------------------------
+            # 인증 처리
+            # -------------------------
+            await process_auth(
+                interaction,
+                char_name,
+                server_name,
+                class_name,
+                item_level,
+            )
 
         finally:
             active_auth_users.discard(user_id)
